@@ -1,0 +1,9 @@
+{
+  "config": {
+    "server": "localhost",
+    "port": 6667,
+    "nick": "dirc",
+    "channels": [ "#dirc", "#wooh" ]
+  }
+}
+    
