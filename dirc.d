@@ -8,7 +8,9 @@ import std.conv;
 import std.file;
 import std.array;
 import std.concurrency;
+import std.getopt;
 
+extern (C) int fork ();
 
 bool isNumber(string astring) {
   try {
@@ -24,11 +26,37 @@ class CommandHandler : core.thread.Thread {
   Socket conn;
   Tid mainTid;
   bool registered = false;
+  Admin[string] admins;
+  Admin[string] authenticatedAdmins;
+  bool[string] channelsJoined;
+  string nick;
 
   this(Socket connection, Tid tid) {
     conn = connection;
     mainTid = tid;
     super(&run);
+  }
+
+  void addAdmin(string username, string password) {
+    verboseWrite("Adding admin : %s", username);
+    admins[username] = Admin(username, password);
+  }
+
+  void addAuthenticatedAdmin(string ircUser, Admin admin) {
+    authenticatedAdmins[ircUser] = admin;
+  }
+
+  bool authenticateAdmin(string ircUser, string username, string password) {
+    Admin *admin = (username in admins);
+    if(admin is null) return false;
+    if(admin.password == password) {
+      addAuthenticatedAdmin(ircUser, *admin);
+      return true;
+    } else return false;
+  }
+
+  bool isAuthenticated(string ircUser) {
+    return ((ircUser in authenticatedAdmins) !is null);
   }
 
   string getNick(string prefix) {
@@ -37,37 +65,125 @@ class CommandHandler : core.thread.Thread {
 
   void setRegistered(bool r) {
     registered = r;
-    register();
+    notifyRegistered();
   }
 
-  void register() { // notify main thread that we are good to go.
+  void notifyRegistered() { // notify main thread that we are good to go.
     send(mainTid, isRegistered);
+  }
+
+  void register() {
+    conn.send("user dirc 0 * :DIRC IRC Bot\r\n");
+  }
+
+  void setNick(string nick) {
+    verboseWrite("Set nick to " ~ nick);
+    conn.send("nick " ~ nick ~ "\r\n");
+    this.nick = nick;
+  }
+
+  void joinChannel(string channel) {
+    if(isRegistered) {
+      conn.send("join " ~ channel ~ "\r\n");
+      channelsJoined[channel] = true;
+    }
+  }
+
+  bool isInChannel(string channel) {
+    return (((channel in channelsJoined) !is null) && (channelsJoined[channel] == true));
+  }
+
+  void sendMessage(string user, string message) {
+    if(isRegistered) conn.send("privmsg " ~ user ~ " :" ~ message ~ "\r\n");
+  }
+
+  void changeMode(string user, string channel, string mode) {
+    if(isRegistered) conn.send("mode " ~ channel ~ " " ~ mode ~ " " ~ user ~ "\r\n");
   }
 
   bool isRegistered() {
     return registered;
   }
 
+  string getSrc(string message) {
+    auto result = match(message, `(\S+)\s+(\S+)`);
+    return result.captures[1];
+  }
+
+  string getDest(string message) {
+    auto result = match(message, `(\S+)\s+(\S+)`);
+    return result.captures[2];
+  }
+
   void handleNumeric(string prefix, int numeric, string destination, string message) {
+    debugWrite("%s - %s - %s", numeric, destination, message);
     switch(numeric) {
       case 001: // welcome
         setRegistered(true);
+        break;
+      case 403: // no such channel
+        verboseWrite("Error joining channel %s : %s", getDest(destination), message);
         break;
       default:
     }
   }
 
+  void handleUserCommand(string from, string command, string parameters) {
+    switch(command.toUpper) {
+      case "AUTH":
+        auto result = match(parameters, `(\S+)\s+(\S+)`);
+        string username = result.captures[1];
+        string password = result.captures[2];
+        if(authenticateAdmin(from, username, password))
+          sendMessage(from, "Greetings, " ~ username ~ ", you are authenticated.");
+        else
+          sendMessage(from, "Authentication failed.");
+        break;
+      case "STATUS":
+        if(isAuthenticated(from))
+          sendMessage(from, "Hello " ~ from ~ ", you are authenticated as admin!");
+        else
+          sendMessage(from, "Bummer, no can do");
+        break;
+      case "OP":
+        if((isInChannel(parameters)) && (isAuthenticated(from))) {
+          changeMode(from, parameters, "+o");
+        }
+        break;
+      default:  
+    }
+  }
+
+  void handlePrivateMessage(string from, string message) {
+    auto result = match(message, `(\S+)\s*(.*)`);
+    string command = result.captures[1];
+    string parameters = result.captures[2];
+
+    handleUserCommand(from, command, parameters);
+    debugWrite("Command %s, parameters %s", command, parameters);
+  }
+
   void handleCommand(string prefix, string type, string destination, string message) {
-    switch(type) {
+    switch(type.toUpper) {
       case "PING":
         conn.send("PONG " ~ message);
         break;
       case "PRIVMSG":
-        writefln("<%s> %s\n", getNick(prefix), message);
+        verboseWrite("<%s> %s\n", getNick(prefix), message);
+        if(destination == nick) handlePrivateMessage(prefix, message);
+        break;
+      case "JOIN":
+        verboseWrite("Joined channel %s", message);
+        break;
+      case "KICK":
+        verboseWrite("Kicked from channel %s by %s", getSrc(destination), prefix);
+        channelsJoined[getSrc(destination)] = false;
         break;
       default:
         if(isNumber(type))
           handleNumeric(prefix, to!int(type), destination, message);
+        else
+          debugWrite("%s - %s - %s", type, destination, message);
     }
   }
 
@@ -95,6 +211,22 @@ class CommandHandler : core.thread.Thread {
   }
 }
 
+// __gshared makes these reachable from the other thread
+__gshared bool debugMode = false;
+__gshared bool verbose = false;
+__gshared bool daemon = false;
+string configfile = "config.json";
+
+void debugWrite(Char, A...)(in Char[] fmt, A args) {
+  if(debugMode)
+    writefln(fmt, args);
+}
+
+void verboseWrite(Char, A...)(in Char[] fmt, A args) {
+  if(verbose)
+    writefln(fmt, args);
+}
+
 Socket connectToServer(string host, ushort port) {
   Socket conn = new TcpSocket();
   conn.connect(new InternetAddress(host.dup, port));
@@ -102,11 +234,17 @@ Socket connectToServer(string host, ushort port) {
   return conn;
 }
 
+struct Admin {
+  string username;
+  string password;
+}
+
 struct Config {
   string server;
   ushort port;
   string nick;
   string[] channels;
+  Admin[] admins;
 }
 
 Config readConfigFile(string filename) {
@@ -116,34 +254,55 @@ Config readConfigFile(string filename) {
   auto port = to!ushort(cfg["port"].integer);
   string nick = cfg["nick"].str;
   string[] channels = array(cfg["channels"].array.map!(a => to!string(a.str))); // whoa!!
+  Admin[] admins;
+  foreach(admin; cfg["admins"].array) {
+    admins ~= Admin(admin["username"].str, admin["password"].str);
+  }
 
-  return Config(server, port, nick, channels);
+  return Config(server, port, nick, channels, admins);
 }
 
-void setNick(Socket conn, string nick) {
-  writeln("Set nick to " ~ nick);
-  conn.send("nick " ~ nick ~ "\r\n");
-}
+void main(string[] args) {
+  getopt(args,
+    "debug", &debugMode,
+    "verbose", &verbose,
+    "daemon", &daemon,
+    "config", &configfile
+  );
 
-void joinChannel(Socket conn, string channel) {
-  writeln("Joined channel " ~ channel);
-  conn.send("join " ~ channel ~ "\r\n");
-}
+  if(daemon && debugMode) {
+    debugWrite("Can't daemonize when debug mode is on.");
+    daemon = false;
+  }
 
-void main() {
-  auto config = readConfigFile("config.json");
+  if(debugMode)
+    verbose = true;
+
+  if(daemon) {
+    verbose = false;
+    debugMode = false;
+  }
+
+  if(daemon)
+    if(fork()) std.c.stdlib.exit(0); // into the background we go
+
+  auto config = readConfigFile(configfile);
   Socket conn = connectToServer(config.server, config.port);
   CommandHandler ch = new CommandHandler(conn, thisTid);
   ch.start();
  
-  writeln("Registering on IRC server " ~ config.server);
-  conn.send("user dirc 0 * :DIRC IRC Bot\r\n");
-  setNick(conn, config.nick);
-  bool registered = receiveOnly!(bool);
+  foreach(admin; config.admins) {
+    ch.addAdmin(admin.username, admin.password);
+  }
+
+  verboseWrite("Registering on IRC server " ~ config.server);
+  ch.register();
+  ch.setNick(config.nick);
+  bool registered = receiveOnly!(bool); // wait until registered flag is set
 
   if(registered) { 
     foreach(channel; config.channels)
-      joinChannel(conn, channel);
+      ch.joinChannel(channel);
   }
 }
 

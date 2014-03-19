@@ -3,7 +3,8 @@
     "server": "localhost",
     "port": 6667,
     "nick": "dirc",
-    "channels": [ "#dirc", "#wooh" ]
+    "channels": [ "#dirc", "#wooh", "$fail" ],
+    "admins": [{ "username": "admin", "password": "admin123" }]
   }
 }
     
