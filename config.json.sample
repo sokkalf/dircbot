@@ -2,9 +2,11 @@
   "config": {
     "server": "localhost",
     "port": 6667,
+    "password": "default123",
     "nick": "dirc",
-    "channels": [ "#dirc", "#wooh", "$fail" ],
+    "channels": [ "#dirc", "#wooh" ],
     "admins": [{ "username": "admin", "password": "admin123" }]
   }
 }
+
     
