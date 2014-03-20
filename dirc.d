@@ -12,15 +12,6 @@ import std.getopt;
 
 extern (C) int fork ();
 
-bool isNumber(string astring) {
-  try {
-    int anumber = to!int(astring);
-    return true;
-  } catch (ConvException ce) {
-    return false;
-  }
-}
-
 class CommandHandler : core.thread.Thread {
   import std.regex, std.algorithm, std.range, std.stdio;
   Socket conn;
@@ -124,7 +115,6 @@ class CommandHandler : core.thread.Thread {
   }
 
   void handleNumeric(string prefix, int numeric, string destination, string message) {
-    debugWrite("%s - %s - %s", numeric, destination, message);
     switch(numeric) {
       case 001: // welcome
         setRegistered(true);
@@ -154,9 +144,11 @@ class CommandHandler : core.thread.Thread {
           sendMessage(from, "Bummer, no can do");
         break;
       case "OP":
-        if((isInChannel(parameters)) && (isAuthenticated(from))) {
-          changeMode(from, parameters, "+o");
-        }
+        if(isAuthenticated(from)) {
+          if(isInChannel(parameters)) { 
+            changeMode(from, parameters, "+o");
+          } else sendMessage(from, "I'm not in that channel!");
+        } else sendMessage(from, "Not authorized.");
         break;
       default:  
     }
@@ -181,11 +173,23 @@ class CommandHandler : core.thread.Thread {
         if(destination == nick) handlePrivateMessage(prefix, message);
         break;
       case "JOIN":
-        verboseWrite("Joined channel %s", message);
+        if(getNick(prefix) == nick)
+          verboseWrite("Joined channel %s", message);
+        else verboseWrite("%s joined channel %s", getNick(prefix), message);
+        break;
+      case "PART":
+        if(getNick(prefix) == nick)
+          verboseWrite("Left channel %s", destination);
+        else verboseWrite("%s left channel %s", getNick(prefix), destination);
         break;
       case "KICK":
-        verboseWrite("Kicked from channel %s by %s", getSrc(destination), prefix);
-        channelsJoined[getSrc(destination)] = false;
+        if(getDest(destination) == nick) {
+          verboseWrite("Kicked from channel %s by %s", getSrc(destination), getNick(prefix));
+          channelsJoined[getSrc(destination)] = false;
+        } else verboseWrite("%s was kicked from channel %s by %s", getDest(destination), getSrc(destination), getNick(prefix));
+        break;
+      case "MODE":
+        verboseWrite("Mode change %s - %s", destination, message);
         break;
       case "ERROR":
         if(isRegistering) {
@@ -194,15 +198,14 @@ class CommandHandler : core.thread.Thread {
         }
         break;
       default:
-        if(isNumber(type))
+        if(isNumeric(type))
           handleNumeric(prefix, to!int(type), destination, message);
-        else
-          debugWrite("%s %s %s %s", prefix, type, destination, message);
     }
   }
 
   void handleString(string s) {
     foreach(command; s.split("\r\n")) {
+      debugWrite(command);
       auto result = match(command, `^(?:[:](\S+) )?(\S+)(?: (?!:)(.+?))?(?: [:](.+))?$`);
 
       foreach(line; result) {
@@ -231,12 +234,12 @@ __gshared bool verbose = false;
 __gshared bool daemon = false;
 string configfile = "config.json";
 
-void debugWrite(Char, A...)(in Char[] fmt, A args) {
+void debugWrite(Char, A...)(in Char[] fmt, lazy A args) {
   if(debugMode)
     writefln(fmt, args);
 }
 
-void verboseWrite(Char, A...)(in Char[] fmt, A args) {
+void verboseWrite(Char, A...)(in Char[] fmt, lazy A args) {
   if(verbose)
     writefln(fmt, args);
 }
