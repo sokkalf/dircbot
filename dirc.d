@@ -26,6 +26,7 @@ class CommandHandler : core.thread.Thread {
   Socket conn;
   Tid mainTid;
   bool registered = false;
+  bool isRegistering = false;
   Admin[string] admins;
   Admin[string] authenticatedAdmins;
   bool[string] channelsJoined;
@@ -68,16 +69,23 @@ class CommandHandler : core.thread.Thread {
     notifyRegistered();
   }
 
-  void notifyRegistered() { // notify main thread that we are good to go.
+  void notifyRegistered() { // notify main thread that we are good to go.   
     send(mainTid, isRegistered);
+    isRegistering = false;
   }
 
   void register() {
+    isRegistering = true;
     conn.send("user dirc 0 * :DIRC IRC Bot\r\n");
   }
 
+  void register(string password) {
+    conn.send("pass " ~ password ~ "\r\n");
+    register();
+  }
+
   void setNick(string nick) {
-    verboseWrite("Set nick to " ~ nick);
+    verboseWrite("Setting nick to " ~ nick);
     conn.send("nick " ~ nick ~ "\r\n");
     this.nick = nick;
   }
@@ -179,11 +187,17 @@ class CommandHandler : core.thread.Thread {
         verboseWrite("Kicked from channel %s by %s", getSrc(destination), prefix);
         channelsJoined[getSrc(destination)] = false;
         break;
+      case "ERROR":
+        if(isRegistering) {
+          verboseWrite(message);
+          setRegistered(false);
+        }
+        break;
       default:
         if(isNumber(type))
           handleNumeric(prefix, to!int(type), destination, message);
         else
-          debugWrite("%s - %s - %s", type, destination, message);
+          debugWrite("%s %s %s %s", prefix, type, destination, message);
     }
   }
 
@@ -242,16 +256,20 @@ struct Admin {
 struct Config {
   string server;
   ushort port;
+  string serverPassword;
   string nick;
   string[] channels;
   Admin[] admins;
 }
 
 Config readConfigFile(string filename) {
+  // seems to crash with segfault if any of these fields are NOT present in config file..! :(
   auto content = filename.readText;
+
   JSONValue cfg = parseJSON(content)["config"];
   string server = cfg["server"].str;
   auto port = to!ushort(cfg["port"].integer);
+  string serverPassword = cfg["password"].str;
   string nick = cfg["nick"].str;
   string[] channels = array(cfg["channels"].array.map!(a => to!string(a.str))); // whoa!!
   Admin[] admins;
@@ -259,7 +277,7 @@ Config readConfigFile(string filename) {
     admins ~= Admin(admin["username"].str, admin["password"].str);
   }
 
-  return Config(server, port, nick, channels, admins);
+  return Config(server, port, serverPassword, nick, channels, admins);
 }
 
 void main(string[] args) {
@@ -296,13 +314,21 @@ void main(string[] args) {
   }
 
   verboseWrite("Registering on IRC server " ~ config.server);
-  ch.register();
+  // if password is not empty, register with password
+  if(!config.serverPassword.empty)
+    ch.register(config.serverPassword);
+  else
+    ch.register();
+
   ch.setNick(config.nick);
   bool registered = receiveOnly!(bool); // wait until registered flag is set
 
   if(registered) { 
     foreach(channel; config.channels)
       ch.joinChannel(channel);
+  } else {
+    verboseWrite("Error registering with IRC server!");
+    std.c.stdlib.exit(1);
   }
 }
 
